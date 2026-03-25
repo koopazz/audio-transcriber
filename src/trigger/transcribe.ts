@@ -12,6 +12,9 @@
 import { task } from "@trigger.dev/sdk/v3";
 import Groq from "groq-sdk";
 import { writeFile, readFile, unlink, stat } from "fs/promises";
+import { createWriteStream } from "fs";
+import { pipeline } from "stream/promises";
+import { Readable } from "stream";
 import { execSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -33,6 +36,8 @@ function getR2Client() {
 export const transcribeAudio = task({
   id: "transcribe-audio",
 
+  machine: "large-2x",
+
   retry: {
     maxAttempts: 3,
   },
@@ -45,16 +50,17 @@ export const transcribeAudio = task({
     const audioPath = join(tmp, `audio-${Date.now()}.mp3`);
 
     try {
-      // --- STEP 1: Download from R2 ---
+      // --- STEP 1: Download from R2 (stream to disk, not RAM) ---
       console.log(`Downloading file: ${payload.fileName}`);
       const getCmd = new GetObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME!,
         Key: payload.r2Key,
       });
       const obj = await r2.send(getCmd);
-      const buffer = Buffer.from(await obj.Body!.transformToByteArray());
-      await writeFile(inputPath, buffer);
-      console.log(`File size: ${(buffer.length / 1024 / 1024).toFixed(1)}MB`);
+      const bodyStream = obj.Body as Readable;
+      await pipeline(bodyStream, createWriteStream(inputPath));
+      const inputStat = await stat(inputPath);
+      console.log(`File size: ${(inputStat.size / 1024 / 1024).toFixed(1)}MB`);
 
       // --- STEP 2: Extract audio as compressed MP3 ---
       console.log("Extracting audio track...");
