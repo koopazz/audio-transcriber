@@ -9,6 +9,8 @@ const r2 = new S3Client({
   region: "auto",
   endpoint: process.env.R2_ENDPOINT!,
   forcePathStyle: true,
+  requestChecksumCalculation: "WHEN_REQUIRED",
+  responseChecksumValidation: "WHEN_REQUIRED",
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID!,
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
@@ -32,8 +34,11 @@ export async function POST(req: NextRequest) {
       ContentType: contentType || "application/octet-stream",
     });
 
-    // Presigned URL valid for 1 hour
-    const presignedUrl = await getSignedUrl(r2, command, { expiresIn: 3600 });
+    // Presigned URL valid for 1 hour, unsigned payload so browser can upload any content
+    const presignedUrl = await getSignedUrl(r2, command, {
+      expiresIn: 3600,
+      unhoistableHeaders: new Set(["x-amz-checksum-crc32"]),
+    });
 
     return NextResponse.json({ presignedUrl, key });
   } catch (error) {
