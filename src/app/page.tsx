@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { upload } from "@vercel/blob/client";
 
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
 
@@ -18,27 +19,27 @@ export default function Home() {
     setError("");
 
     try {
-      // Step 1: Upload the file and trigger the background job
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const res = await fetch("/api/transcribe", {
-        method: "POST",
-        body: formData,
+      // Step 1: Upload directly from browser to Vercel Blob (no server size limit)
+      const blob = await upload(file.name, file, {
+        access: "public",
+        handleUploadUrl: "/api/upload",
       });
 
-      if (!res.ok) {
-        throw new Error(await res.text());
-      }
+      // Step 2: Tell Trigger.dev to process it
+      const res = await fetch("/api/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileUrl: blob.url, fileName: file.name }),
+      });
+
+      if (!res.ok) throw new Error(await res.text());
 
       const { runId } = await res.json();
       setStatus("processing");
 
-      // Step 2: Poll for the result
-      // (In Zapier terms: we're waiting for the Zap to finish)
+      // Step 3: Poll for the result
       while (true) {
-        await new Promise((r) => setTimeout(r, 2000)); // check every 2 seconds
-
+        await new Promise((r) => setTimeout(r, 2000));
         const poll = await fetch(`/api/transcribe/status?runId=${runId}`);
         const data = await poll.json();
 
@@ -49,7 +50,6 @@ export default function Home() {
         } else if (data.status === "FAILED" || data.status === "CANCELED") {
           throw new Error(data.error || "Transcription failed");
         }
-        // Otherwise it's still running — keep polling
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -84,51 +84,30 @@ export default function Home() {
         </p>
       </div>
 
-      {/* Drop zone */}
       <label
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
         className={`w-full border-2 border-dashed rounded-xl p-16 text-center cursor-pointer transition-colors ${
-          dragOver
-            ? "border-blue-500 bg-blue-500/10"
-            : "border-zinc-700 hover:border-zinc-500"
+          dragOver ? "border-blue-500 bg-blue-500/10" : "border-zinc-700 hover:border-zinc-500"
         }`}
       >
-        <input
-          type="file"
-          accept="audio/*,video/*"
-          onChange={onFileSelect}
-          className="hidden"
-        />
+        <input type="file" accept="audio/*,video/*" onChange={onFileSelect} className="hidden" />
         <p className="text-lg">
-          {status === "idle"
-            ? "Drag & drop your file here, or click to browse"
-            : `Selected: ${fileName}`}
+          {status === "idle" ? "Drag & drop your file here, or click to browse" : `Selected: ${fileName}`}
         </p>
       </label>
 
-      {/* Status */}
       {status === "uploading" && (
-        <div className="flex items-center gap-3 text-blue-400">
-          <Spinner /> Uploading file...
-        </div>
+        <div className="flex items-center gap-3 text-blue-400"><Spinner /> Uploading file...</div>
       )}
       {status === "processing" && (
-        <div className="flex items-center gap-3 text-yellow-400">
-          <Spinner /> Trigger.dev is transcribing your file with Groq...
-        </div>
+        <div className="flex items-center gap-3 text-yellow-400"><Spinner /> Transcribing with Groq...</div>
       )}
       {status === "error" && (
-        <div className="text-red-400 bg-red-400/10 rounded-lg p-4 w-full">
-          Error: {error}
-        </div>
+        <div className="text-red-400 bg-red-400/10 rounded-lg p-4 w-full">Error: {error}</div>
       )}
 
-      {/* Result */}
       {status === "done" && (
         <div className="w-full">
           <h2 className="text-lg font-semibold mb-2">Transcript</h2>
