@@ -34,7 +34,7 @@ export default function Home() {
       const uploadRes = await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("PUT", presignedUrl);
-        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+        // Don't set Content-Type — it's not in the presigned signature
 
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {

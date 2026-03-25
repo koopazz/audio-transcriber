@@ -31,13 +31,12 @@ export async function POST(req: NextRequest) {
     const command = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET_NAME!,
       Key: key,
-      ContentType: contentType || "application/octet-stream",
     });
 
-    // Presigned URL valid for 1 hour, unsigned payload so browser can upload any content
+    // Sign both host and content-type so the browser's PUT doesn't break the signature
     const presignedUrl = await getSignedUrl(r2, command, {
       expiresIn: 3600,
-      unhoistableHeaders: new Set(["x-amz-checksum-crc32"]),
+      signableHeaders: new Set(["host"]),
     });
 
     return NextResponse.json({ presignedUrl, key });
