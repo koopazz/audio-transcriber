@@ -2,10 +2,11 @@
 // THE BACKGROUND JOB — runs on Trigger.dev's servers.
 //
 // Steps:
-//   1. Download the file from Vercel Blob
+//   1. Download the file from Cloudflare R2
 //   2. If it's a video, extract just the audio (much smaller)
 //   3. If still too large, split into chunks
 //   4. Send to Groq's Whisper API for transcription
+//   5. Delete the file from R2 (no lingering storage costs)
 // ============================================================
 
 import { task } from "@trigger.dev/sdk/v3";
@@ -14,8 +15,20 @@ import { writeFile, readFile, unlink, stat } from "fs/promises";
 import { execSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
+import { S3Client, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 
 const MAX_GROQ_SIZE = 24 * 1024 * 1024; // ~24MB to be safe (Groq limit is 25MB)
+
+function getR2Client() {
+  return new S3Client({
+    region: "auto",
+    endpoint: process.env.R2_ENDPOINT!,
+    credentials: {
+      accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+    },
+  });
+}
 
 export const transcribeAudio = task({
   id: "transcribe-audio",
@@ -24,22 +37,26 @@ export const transcribeAudio = task({
     maxAttempts: 3,
   },
 
-  run: async (payload: { fileUrl: string; fileName: string }) => {
+  run: async (payload: { r2Key: string; fileName: string }) => {
     const groq = new Groq();
+    const r2 = getR2Client();
     const tmp = tmpdir();
     const inputPath = join(tmp, `input-${Date.now()}-${payload.fileName}`);
     const audioPath = join(tmp, `audio-${Date.now()}.mp3`);
 
     try {
-      // --- STEP 1: Download the file ---
+      // --- STEP 1: Download from R2 ---
       console.log(`Downloading file: ${payload.fileName}`);
-      const response = await fetch(payload.fileUrl);
-      const buffer = Buffer.from(await response.arrayBuffer());
+      const getCmd = new GetObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME!,
+        Key: payload.r2Key,
+      });
+      const obj = await r2.send(getCmd);
+      const buffer = Buffer.from(await obj.Body!.transformToByteArray());
       await writeFile(inputPath, buffer);
       console.log(`File size: ${(buffer.length / 1024 / 1024).toFixed(1)}MB`);
 
       // --- STEP 2: Extract audio as compressed MP3 ---
-      // This takes a 100MB video down to a few MB of audio
       console.log("Extracting audio track...");
       execSync(
         `ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -ab 64k -ar 16000 -ac 1 "${audioPath}" -y 2>/dev/null`
@@ -72,13 +89,6 @@ export const transcribeAudio = task({
         );
 
         // Find all chunk files
-        const { readdirSync } = require("fs");
-        const chunks: string[] = readdirSync(tmp)
-          .filter((f: string) => f.startsWith(`chunk-${Date.now()}-`))
-          .sort()
-          .map((f: string) => join(tmp, f));
-
-        // If the glob approach doesn't work, use a simpler method
         const chunkFiles: string[] = [];
         for (let i = 0; i < 100; i++) {
           const chunkPath = `${chunkPrefix}${String(i).padStart(3, "0")}.mp3`;
@@ -115,6 +125,18 @@ export const transcribeAudio = task({
       // Clean up temp files
       await unlink(inputPath).catch(() => {});
       await unlink(audioPath).catch(() => {});
+
+      // --- STEP 5: Delete from R2 — no reason to keep it ---
+      console.log("Deleting file from R2...");
+      try {
+        await r2.send(new DeleteObjectCommand({
+          Bucket: process.env.R2_BUCKET_NAME!,
+          Key: payload.r2Key,
+        }));
+        console.log("File deleted from R2.");
+      } catch (e) {
+        console.error("Failed to delete from R2 (non-fatal):", e);
+      }
     }
   },
 });

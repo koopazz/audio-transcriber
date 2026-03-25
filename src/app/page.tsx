@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { upload } from "@vercel/blob/client";
 
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
 
@@ -11,25 +10,52 @@ export default function Home() {
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const handleFile = useCallback(async (file: File) => {
     setFileName(file.name);
     setStatus("uploading");
     setTranscript("");
     setError("");
+    setUploadProgress(0);
 
     try {
-      // Step 1: Upload directly from browser to Vercel Blob (no server size limit)
-      const blob = await upload(file.name, file, {
-        access: "public",
-        handleUploadUrl: "/api/upload",
+      // Step 1: Get a presigned URL from our API
+      const presignRes = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, contentType: file.type }),
       });
 
-      // Step 2: Tell Trigger.dev to process it
+      if (!presignRes.ok) throw new Error("Failed to get upload URL");
+      const { presignedUrl, key } = await presignRes.json();
+
+      // Step 2: Upload directly from browser to R2 using the presigned URL
+      const uploadRes = await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", presignedUrl);
+        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            setUploadProgress(Math.round((e.loaded / e.total) * 100));
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload failed with status ${xhr.status}`));
+        };
+
+        xhr.onerror = () => reject(new Error("Upload failed"));
+        xhr.send(file);
+      });
+
+      // Step 3: Tell Trigger.dev to process it
       const res = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileUrl: blob.url, fileName: file.name }),
+        body: JSON.stringify({ r2Key: key, fileName: file.name }),
       });
 
       if (!res.ok) throw new Error(await res.text());
@@ -37,7 +63,7 @@ export default function Home() {
       const { runId } = await res.json();
       setStatus("processing");
 
-      // Step 3: Poll for the result
+      // Step 4: Poll for the result
       while (true) {
         await new Promise((r) => setTimeout(r, 2000));
         const poll = await fetch(`/api/transcribe/status?runId=${runId}`);
@@ -99,7 +125,12 @@ export default function Home() {
       </label>
 
       {status === "uploading" && (
-        <div className="flex items-center gap-3 text-blue-400"><Spinner /> Uploading file...</div>
+        <div className="w-full">
+          <div className="flex items-center gap-3 text-blue-400 mb-2"><Spinner /> Uploading file... {uploadProgress}%</div>
+          <div className="w-full bg-zinc-800 rounded-full h-2">
+            <div className="bg-blue-500 h-2 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+          </div>
+        </div>
       )}
       {status === "processing" && (
         <div className="flex items-center gap-3 text-yellow-400"><Spinner /> Transcribing with Groq...</div>
